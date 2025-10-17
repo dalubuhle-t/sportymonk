@@ -7,12 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 app = Flask(__name__)
 
+# === API CONFIG ===
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
 
+# === Helper function for SportMonks GET requests ===
 def sportmonks_get(endpoint, params=None):
-    """Generic GET helper with API key injection and error handling"""
     if params is None:
         params = {}
     params["api_token"] = SPORTMONKS_API_KEY
@@ -25,6 +26,7 @@ def sportmonks_get(endpoint, params=None):
         return {"error": str(e), "endpoint": endpoint}
 
 
+# === ROUTES ===
 @app.route("/")
 def home():
     return jsonify({"status": "SportMonks Connector + UFP Live ✅"})
@@ -33,11 +35,7 @@ def home():
 @app.route("/fixtures/today")
 def fixtures_today():
     today = date.today().strftime("%Y-%m-%d")
-    # SportMonks v3 requires semicolon-separated includes
-    data = sportmonks_get(
-        f"fixtures/date/{today}",
-        {"include": "participants;league;venue"}
-    )
+    data = sportmonks_get(f"fixtures/date/{today}", {"include": "localTeam,visitorTeam,league"})
     return jsonify({"date": today, "fixtures": data})
 
 
@@ -67,11 +65,7 @@ def standings(league_id):
 
 @app.route("/ufp/<team_a>/<team_b>")
 def ufp_prediction_data(team_a, team_b):
-    """
-    Provides normalized input for UFP System — form, goals, injuries
-    """
     try:
-        # 1. Search both teams
         search_a = sportmonks_get("teams/search", {"name": team_a})
         search_b = sportmonks_get("teams/search", {"name": team_b})
 
@@ -81,11 +75,9 @@ def ufp_prediction_data(team_a, team_b):
         team_a_id = search_a["data"][0]["id"]
         team_b_id = search_b["data"][0]["id"]
 
-        # 2. Fetch stats and form
         a_info = sportmonks_get(f"teams/{team_a_id}", {"include": "stats,form,injuries"})
         b_info = sportmonks_get(f"teams/{team_b_id}", {"include": "stats,form,injuries"})
 
-        # 3. Simplify for UFP
         result = {
             "match": f"{team_a} vs {team_b}",
             "team_a": {
@@ -108,6 +100,54 @@ def ufp_prediction_data(team_a, team_b):
         return jsonify({"error": str(e)}), 500
 
 
+# === AUTOMATIC UFP PREDICTION ROUTES ===
+@app.route("/predictions/today")
+def auto_ufp_today():
+    today = date.today().strftime("%Y-%m-%d")
+    fixtures_data = sportmonks_get(f"fixtures/date/{today}", {"include": "localTeam,visitorTeam,league"})
+    results = []
+
+    if "data" not in fixtures_data:
+        return jsonify({"error": "No fixtures found today", "data": fixtures_data})
+
+    for fixture in fixtures_data.get("data", []):
+        team_a = fixture.get("localTeam", {}).get("name")
+        team_b = fixture.get("visitorTeam", {}).get("name")
+        league = fixture.get("league", {}).get("name")
+
+        if not team_a or not team_b:
+            continue
+
+        # Fetch UFP stats for each match
+        ufp_data = ufp_prediction_data(team_a, team_b).get_json()
+        results.append({"league": league, "match": f"{team_a} vs {team_b}", "ufp_data": ufp_data})
+
+    return jsonify({"date": today, "predictions": results})
+
+
+@app.route("/predictions/live")
+def auto_ufp_live():
+    fixtures_data = sportmonks_get("fixtures/live", {"include": "localTeam,visitorTeam,league"})
+    results = []
+
+    if "data" not in fixtures_data:
+        return jsonify({"error": "No live fixtures found", "data": fixtures_data})
+
+    for fixture in fixtures_data.get("data", []):
+        team_a = fixture.get("localTeam", {}).get("name")
+        team_b = fixture.get("visitorTeam", {}).get("name")
+        league = fixture.get("league", {}).get("name")
+
+        if not team_a or not team_b:
+            continue
+
+        ufp_data = ufp_prediction_data(team_a, team_b).get_json()
+        results.append({"league": league, "match": f"{team_a} vs {team_b}", "ufp_data": ufp_data})
+
+    return jsonify({"predictions_live": results})
+
+
+# === LIST ROUTES ===
 @app.route("/routes")
 def list_routes():
     import urllib
@@ -119,5 +159,6 @@ def list_routes():
     return jsonify({"available_routes": output})
 
 
+# === MAIN RUN ===
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
