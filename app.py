@@ -33,7 +33,11 @@ def home():
 @app.route("/fixtures/today")
 def fixtures_today():
     today = date.today().strftime("%Y-%m-%d")
-    data = sportmonks_get(f"fixtures/date/{today}", {"include": "localTeam,visitorTeam,league"})
+    # SportMonks v3 requires semicolon-separated includes
+    data = sportmonks_get(
+        f"fixtures/date/{today}",
+        {"include": "participants;league;venue"}
+    )
     return jsonify({"date": today, "fixtures": data})
 
 
