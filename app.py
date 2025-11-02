@@ -8,14 +8,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-
-# --- Enable CORS globally so ChatGPT, browsers, and any HTTPS client can connect ---
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app, resources={r"/*": {"origins": "*"}})  # Allow ChatGPT, browsers, etc.
 
 # --- Configuration ---
 SPORTMONKS_API_KEY = os.getenv("SPORTMONKS_API_KEY")
 BASE_URL = "https://api.sportmonks.com/v3/football"
 
+# --- In-memory caches for live updates via webhook ---
+live_matches_cache = []
+player_stats_cache = []
 
 # --- Helper: API Request Wrapper ---
 def sportmonks_get(endpoint, params=None):
@@ -31,73 +32,29 @@ def sportmonks_get(endpoint, params=None):
     except Exception as e:
         return {"error": str(e), "endpoint": endpoint}
 
-
-# --- FOOTBALL ENDPOINTS ---
-
+# --- FOOTBALL ENDPOINTS (unchanged) ---
 @app.route("/football/leagues")
 def leagues_all():
     data = sportmonks_get("leagues")
-    return jsonify({"endpoint": "/football/leagues", "data": data}), 200, {"Content-Type": "application/json"}
-
+    return jsonify({"endpoint": "/football/leagues", "data": data}), 200
 
 @app.route("/football/leagues/<int:league_id>")
 def league_details(league_id):
     data = sportmonks_get(f"leagues/{league_id}", {"include": "country,seasons"})
-    return jsonify({"endpoint": f"/football/leagues/{league_id}", "data": data}), 200, {"Content-Type": "application/json"}
+    return jsonify({"endpoint": f"/football/leagues/{league_id}", "data": data}), 200
 
-
-@app.route("/football/leagues/live")
-def leagues_live():
-    data = sportmonks_get("leagues/live")
-    return jsonify({"endpoint": "/football/leagues/live", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-@app.route("/football/leagues/date/<string:date_str>")
-def leagues_by_date(date_str):
-    data = sportmonks_get(f"leagues/date/{date_str}")
-    return jsonify({"endpoint": f"/football/leagues/date/{date_str}", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-@app.route("/football/leagues/countries/<int:country_id>")
-def leagues_by_country(country_id):
-    data = sportmonks_get(f"countries/{country_id}/leagues")
-    return jsonify({"endpoint": f"/football/leagues/countries/{country_id}", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-@app.route("/football/leagues/search/<string:search_query>")
-def leagues_search(search_query):
-    data = sportmonks_get("leagues/search", {"name": search_query})
-    return jsonify({"endpoint": f"/football/leagues/search/{search_query}", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-@app.route("/football/leagues/teams/<int:league_id>")
-def league_teams(league_id):
-    data = sportmonks_get(f"leagues/{league_id}/teams", {"include": "country"})
-    return jsonify({"endpoint": f"/football/leagues/teams/{league_id}", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-@app.route("/football/leagues/teams/<int:league_id>/current")
-def league_teams_current(league_id):
-    data = sportmonks_get(f"leagues/{league_id}/teams/current")
-    return jsonify({"endpoint": f"/football/leagues/teams/{league_id}/current", "data": data}), 200, {"Content-Type": "application/json"}
-
-
-# --- Live & Expected Fixtures ---
 @app.route("/football/livescore/inplay")
 def livescore_inplay():
     data = sportmonks_get("livescores/inplay", {"include": "league,localTeam,visitorTeam"})
-    return jsonify({"endpoint": "/football/livescore/inplay", "data": data}), 200, {"Content-Type": "application/json"}
-
+    return jsonify({"endpoint": "/football/livescore/inplay", "data": data}), 200
 
 @app.route("/football/expected/fixtures")
 def expected_fixtures():
     data = sportmonks_get("fixtures/expected", {"include": "league,localTeam,visitorTeam"})
-    return jsonify({"endpoint": "/football/expected/fixtures", "data": data}), 200, {"Content-Type": "application/json"}
+    return jsonify({"endpoint": "/football/expected/fixtures", "data": data}), 200
 
-
-# --- Ultimate Football Prediction (UFP) ---
+# --- UFP Prediction Model (unchanged) ---
 def ufp_predict(team_a_data, team_b_data):
-    """Simplified predictive model using stats"""
     a_attack = team_a_data.get("stats", {}).get("goals_scored", 1)
     a_defense = team_a_data.get("stats", {}).get("goals_conceded", 1)
     b_attack = team_b_data.get("stats", {}).get("goals_scored", 1)
@@ -123,7 +80,6 @@ def ufp_predict(team_a_data, team_b_data):
         "Correct_Score": f"{a_goals}-{b_goals}"
     }
 
-
 @app.route("/ufp/<team_a>/<team_b>")
 def ufp_endpoint(team_a, team_b):
     search_a = sportmonks_get("teams/search", {"name": team_a})
@@ -144,14 +100,51 @@ def ufp_endpoint(team_a, team_b):
         "team_a": team_a_data,
         "team_b": team_b_data,
         "prediction": prediction
-    }), 200, {"Content-Type": "application/json"}
+    }), 200
 
+# --- WEBHOOK ENDPOINTS ---
+@app.route("/webhook/live-match", methods=["POST"])
+def webhook_live_match():
+    """Receive real-time match updates from external services"""
+    data = request.json
+    match_id = data.get("matchId")
+    if match_id:
+        existing = next((m for m in live_matches_cache if m["matchId"] == match_id), None)
+        if existing:
+            existing.update(data)
+        else:
+            live_matches_cache.append(data)
+    return jsonify({"status": "received"}), 200
+
+@app.route("/matches", methods=["GET"])
+def get_live_matches():
+    """Expose live matches to ChatGPT via GET"""
+    league = request.args.get("league")
+    matches = [m for m in live_matches_cache if not league or m.get("league") == league]
+    return jsonify({"matches": matches}), 200
+
+@app.route("/webhook/player-stats", methods=["POST"])
+def webhook_player_stats():
+    """Receive real-time player stats updates"""
+    data = request.json
+    player_id = data.get("playerId")
+    if player_id:
+        existing = next((p for p in player_stats_cache if p["playerId"] == player_id), None)
+        if existing:
+            existing.update(data)
+        else:
+            player_stats_cache.append(data)
+    return jsonify({"status": "received"}), 200
+
+@app.route("/player-stats", methods=["GET"])
+def get_player_stats():
+    """Expose player stats to ChatGPT via GET"""
+    return jsonify({"playerStats": player_stats_cache}), 200
 
 # --- Home & Routes ---
 @app.route("/")
 def home():
-    return jsonify({"status": "✅ SportMonks + UFP Extended API Live & ChatGPT-Compatible"}), 200, {"Content-Type": "application/json"}
-
+    return jsonify({"status": "✅ SportMonks + UFP Extended API with Webhooks Live & ChatGPT-Compatible"}), 200
 
 @app.route("/routes")
 def list_routes():
@@ -161,9 +154,8 @@ def list_routes():
         methods = ','.join(rule.methods)
         line = urllib.parse.unquote(f"{rule.endpoint}: {methods} {rule}")
         output.append(line)
-    return jsonify({"available_routes": output}), 200, {"Content-Type": "application/json"}
-
+    return jsonify({"available_routes": output}), 200
 
 # --- Run ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
